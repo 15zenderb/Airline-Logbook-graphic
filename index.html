@@ -208,10 +208,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
     document.getElementById("loadDefaultsBtn").addEventListener("click", loadDefaults);
 
-    // Auto-load on page open
-    window.addEventListener("load", loadDefaults);
-
-
     // Filter toggles
     document.getElementById('filterAllAirports').onchange = e=>{ 
       if(e.target.checked) drawAllAirports(); 
@@ -248,38 +244,57 @@ document.addEventListener('DOMContentLoaded', ()=>{
     }
 
     // === CSV parsing ===
-    function parseAirportCSV(file){
+   function parseAirportCSV(file){
       Papa.parse(file, {
         header: true,
         skipEmptyLines: true,
         complete: function(results) {
           let count = 0;
-          results.data.forEach((row, idx) => {
-            const ident = (row.ident || row.IDENT || row.ICAO || row.icao || '').toString().trim();
-            const iata = (row.iata_code || row.IATA || row.iata || '').toString().trim();
-            const gps  = (row.gps_code || row.GPS || row.gps || '').toString().trim();
-            const local= (row.local_code || row.local || '').toString().trim();
+          results.data.forEach(row => {
+            const ident = (row.ICAO || row.ident || row.IDENT || row.icao || '').toString().trim();
+            const iata  = (row.iata_code || row.IATA || row.iata || '').toString().trim();
+            const gps   = (row.gps_code || row.GPS || row.gps || '').toString().trim();
+            const local = (row.local_code || row.local || '').toString().trim();
+            const lat   = parseFloat(row.Lat || row.latitude_deg || row.latitude || row.lat);
+            const lon   = parseFloat(row.Lon || row.longitude_deg || row.longitude || row.lon);
+            const name  = row.Name || row.name || row.municipality || '';
+            const airportObj = {
+              id: row.id || '',
+              ICAO: ident,
+              IATA: iata,
+              GPS: gps,
+              local_code: local,
+              type: row.type || '',
+              name,
+              municipality: row.municipality || '',
+              elevation_ft: row.elevation_ft || '',
+              continent: row.continent || '',
+              iso_country: row.iso_country || '',
+              iso_region: row.iso_region || '',
+              scheduled_service: row.scheduled_service || '',
+              home_link: row.home_link || '',
+              wikipedia_link: row.wikipedia_link || '',
+              keywords: row.keywords || '',
+              lat, lng: lon
+            };
 
-            const lat = parseFloat(row.latitude_deg || row.latitude || row.Lat || row.lat);
-            const lon = parseFloat(row.longitude_deg || row.longitude || row.Lon || row.lon);
-            const name = row.name || row.Name || row.municipality || '';
+            // Index by multiple codes for lookup
+            if (ident) airports[ident.toUpperCase()] = airportObj;
+            if (iata)  airports[iata.toUpperCase()]  = airportObj;
+            if (gps)   airports[gps.toUpperCase()]   = airportObj;
+            if (local) airports[local.toUpperCase()] = airportObj;
 
-            if (!isNaN(lat) && !isNaN(lon)) {
-              const airportObj = { lat, lng: lon, name };
-              if (ident) airports[ident.toUpperCase()] = airportObj;
-              if (iata)  airports[iata.toUpperCase()]  = airportObj;
-              if (gps)   airports[gps.toUpperCase()]   = airportObj;
-              if (local) airports[local.toUpperCase()] = airportObj;
-              if (!ident && row.id) airports[String(row.id)] = airportObj;
-              count++;
-            }
+            count++;
           });
+
           log(`Loaded ${count} airports from ${file.name}`);
           if (document.getElementById('filterAllAirports').checked) drawAllAirports();
           if (document.getElementById('filterAirports').checked) drawFlightAirports();
         }
       });
     }
+
+
 
     function parseLogbookCSV(file){
       Papa.parse(file,{header:true,skipEmptyLines:true,complete:function(results){
@@ -307,36 +322,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
         if (document.getElementById('filterAirports').checked) drawFlightAirports();
       }});
     }
-
-    // === Drawing ===
-    function drawAllAirports() {
-      airportMarkers.forEach(m => map.removeLayer(m));
-      airportMarkers = [];
-      Object.values(airports).forEach(a => {
-        if (!a) return;
-        const m = L.circleMarker([a.lat, a.lng], {radius:3, fill:true, fillOpacity:0.8})
-                  .bindPopup(a.name || '')
-                  .addTo(map);
-        airportMarkers.push(m);
-      });
-    }
-
-    function drawFlightAirports(){
-      flightAirportsMarkers.forEach(m=>map.removeLayer(m)); 
-      flightAirportsMarkers=[];
-      const added = new Set();
-      Object.values(routes).forEach(r=>{
-        [r.origin, r.destination].forEach(code=>{
-          if (!code || added.has(code)) return;
-          const a=airports[code];
-          if(a){ 
-            flightAirportsMarkers.push(L.circleMarker([a.lat,a.lng],{radius:4,fill:true,fillOpacity:0.8}).addTo(map)); 
-            added.add(code);
-          }
-        });
-      });
-    }
-
 
     /*Building routes*/
     
@@ -373,41 +358,52 @@ document.addEventListener('DOMContentLoaded', ()=>{
       }
 
       Object.keys(routes).forEach(key => {
-        const r = routes[key];
-        if(!r) return;
-        const a = airports[r.origin];
-        const b = airports[r.destination];
-        if(!a || !b) { r.polyline = null; return; }
+      const r = routes[key];
+      if(!r) return;
+      const a = airports[r.origin];
+      const b = airports[r.destination];
+      if(!a || !b) { r.polyline = null; return; }
 
-        // create curved great-circle arc (returns array of [lat,lng])
-        const arcCoords = createGreatCircleArc([a.lat, a.lng], [b.lat, b.lng], 64);
+      const arcCoords = createGreatCircleArc([a.lat, a.lng], [b.lat, b.lng], 64);
+      const color = getColorForFreq(r.count || 0);
+      const weight = getWeightForFreq(r.count || 0);
 
-        const color = getColorForFreq(r.count || 0);
-        const weight = getWeightForFreq(r.count || 0);
+      // Main visible polyline
+      const poly = L.polyline(arcCoords, { color, weight, opacity: 0.9, smoothFactor: 1, interactive: false }).addTo(map);
 
-        const poly = L.polyline(arcCoords, {
-          color,
-          weight,
-          opacity: 0.9,
-          smoothFactor: 1
-        }).addTo(map);
+      // Invisible hit area
+      const hitPoly = L.polyline(arcCoords, { color, weight: weight + 8, opacity: 0, interactive: true }).addTo(map);
 
-        // hover styling + tooltip
-        poly.on('mouseover', () => {
-          poly.setStyle({ weight: Math.min(weight + 4, 16), opacity: 1 });
-          showRouteTooltip(r, poly);
-        });
-        poly.on('mouseout', () => {
-          poly.setStyle({ weight, opacity: 0.9, color });
-          hideRouteTooltip(poly);
-        });
+      // Forward events from hitPoly to the main polyline
+      hitPoly.on('mouseover', () => poly.fire('mouseover'));
+      hitPoly.on('mouseout', () => poly.fire('mouseout'));
+      hitPoly.on('click', e => poly.fire('click', e));
 
-        poly.bindTooltip(`${r.origin} → ${r.destination}<br/>${r.count} flights`, { direction: 'auto' });
 
-        // keep references both in routeLayers and on the route object (backwards compat)
-        routeLayers[key] = poly;
-        r.polyline = poly;
+      // Tooltip on hover follows cursor
+      poly.bindTooltip(
+        `${r.origin} → ${r.destination}<br/>${r.count} flights`,
+        { direction: 'auto', sticky: true }
+      );
+
+      // Persistent popup on click at cursor location
+      poly.on('click', (e) => {
+        const avg = (r.samples.reduce((a,b)=>a+b,0)/r.samples.length||0).toFixed(2);
+        L.popup({ closeButton: true })
+          .setLatLng(e.latlng) // exactly where the user clicked
+          .setContent(`${r.origin} → ${r.destination}<br/>Flights: ${r.count}<br/>Avg duration: ${avg}h`)
+          .openOn(map);
       });
+
+      // Smooth hover highlight
+      poly.on('mouseover', () => poly.setStyle({ weight: Math.min(weight + 4, 16), opacity: 1 }));
+      poly.on('mouseout', () => poly.setStyle({ weight, opacity: 0.9, color }));
+
+      routeLayers[key] = poly;
+      r.polyline = poly;
+    });
+
+
     }
 
     // Great-circle arc generator: returns array of [lat,lng] points
@@ -533,73 +529,225 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
     window.addEventListener("load", loadDefaults);
 
-  function loadDefaults(){
+// ----------------------
+// Universal CSV parser
+// ----------------------
+function parseCSVData(data, type) {
+    if (type === 'airports') {
+        Object.keys(airports).forEach(k => delete airports[k]); // clear existing
+        let count = 0;
+
+        data.forEach(row => {
+            const lat = parseFloat(row.Lat || row.latitude_deg || row.lat);
+            const lng = parseFloat(row.Lon || row.longitude_deg || row.lon);
+            if (isNaN(lat) || isNaN(lng)) return;
+
+            const airportObj = {
+                lat,
+                lng,
+                name: row.Name || row.name || row.municipality || '',
+                type: row.type || '',
+                municipality: row.municipality || '',
+                ICAO: row.ICAO || row.ident || '',
+                IATA: row.iata_code || '',
+                GPS: row.gps_code || '',
+                local_code: row.local_code || '',
+                elevation_ft: row.elevation_ft || '',
+                scheduled_service: row.scheduled_service || '',
+                continent: row.continent || '',
+                iso_country: row.iso_country || '',
+                iso_region: row.iso_region || '',
+                home_link: row.home_link || '',
+                wikipedia_link: row.wikipedia_link || '',
+                keywords: row.keywords || ''
+            };
+
+            if (airportObj.ICAO)       airports[airportObj.ICAO.toUpperCase()] = airportObj;
+            if (airportObj.IATA)       airports[airportObj.IATA.toUpperCase()] = airportObj;
+            if (airportObj.GPS)        airports[airportObj.GPS.toUpperCase()] = airportObj;
+            if (airportObj.local_code) airports[airportObj.local_code.toUpperCase()] = airportObj;
+
+            count++;
+        });
+
+        console.log(`Airports loaded: ${count}`);
+    }
+
+    else if (type === 'logbook') {
+        routes = {};
+        flights = [];
+
+        data.forEach((r, idx) => {
+            const originRaw = (r.Origin || r.origin || r.ORIGIN || '').toString().trim();
+            const destinationRaw = (r.Destination || r.destination || r.DESTINATION || '').toString().trim();
+            const duration = parseFloat(r.Duration || r.duration || r.DURATION || 0) || 0;
+            if (!originRaw || !destinationRaw) return;
+
+            const o = findAirportForCode(originRaw);
+            const d = findAirportForCode(destinationRaw);
+
+            if (!o.airport || !d.airport) {
+                console.warn(`[Warning] Missing airport for flight ${originRaw} → ${destinationRaw} (resolved: ${o.key} / ${d.key})`);
+            }
+
+            const key = `${o.key} ${d.key}`;
+            if (!routes[key]) routes[key] = { count: 0, samples: [], flights: [], origin: o.key, destination: d.key };
+            routes[key].count++;
+            routes[key].samples.push(duration);
+            routes[key].flights.push(idx);
+
+            flights.push({ id: idx, origin: o.key, destination: d.key, duration, progress: 0 });
+        });
+
+        buildRouteOverlays();
+        populateRouteSelect();
+        console.log(`Logbook loaded: ${flights.length} flights (${Object.keys(routes).length} unique routes)`);
+    }
+}
+
+// ----------------------
+// Load default airports + logbook
+// ----------------------
+function loadDefaults() {
     console.log("Loading default airports and logbook...");
 
     const defaultAirportDBPath = "https://raw.githubusercontent.com/15zenderb/Airline-Logbook-graphic/main/data/airports.csv";
     const defaultLogbookPath   = "https://raw.githubusercontent.com/15zenderb/Airline-Logbook-graphic/main/data/Airline%20chart%20data.csv";
 
-    // --- load airports ---
+    // Step 1: Load airports
     Papa.parse(defaultAirportDBPath, {
-      download: true,
-      header: true,
-      complete: function(results){
-        // clear existing airports
-        Object.keys(airports).forEach(k => delete airports[k]);
+        download: true,
+        header: true,
+        skipEmptyLines: true,
+        complete: function(results) {
+            parseCSVData(results.data, 'airports');
+            if (document.getElementById('filterAllAirports').checked) drawAllAirports();
+            if (document.getElementById('filterAirports').checked) drawFlightAirports();
 
-        results.data.forEach(a => {
-          if(a.ICAO) airports[a.ICAO.toUpperCase()] = {
-            lat: parseFloat(a.Lat),
-            lng: parseFloat(a.Lon),
-            name: a.Name
-          };
-        });
-
-        console.log("Default airport DB loaded:", Object.keys(airports).length);
-        if(document.getElementById('filterAllAirports').checked) drawAllAirports();
-        if(document.getElementById('filterAirports').checked) drawFlightAirports();
-      }
+            // Step 2: Load logbook
+            Papa.parse(defaultLogbookPath, {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    parseCSVData(results.data, 'logbook');
+                    if (document.getElementById('filterAirports').checked) drawFlightAirports();
+                }
+            });
+        }
     });
-
-    // --- load logbook ---
-    Papa.parse(defaultLogbookPath, {
-      download: true,
-      header: true,
-      complete: function(results){
-        flights.length = 0;
-        routes = {};
-
-        results.data.forEach(f => {
-          const route = f["Route of Flight"]?.split("-") || [];
-          const origin = route[0]?.trim();
-          const destination = route[1]?.trim();
-          if(!origin || !destination) return;
-
-          flights.push({
-            origin,
-            destination,
-            date: f.Date,
-            progress: 0
-          });
-
-          const key = `${origin} ${destination}`;
-          if(!routes[key]) routes[key] = { count: 0, samples: [], flights: [], origin, destination };
-          routes[key].count++;
-          routes[key].samples.push(0); // duration placeholder
-        });
-
-        console.log("Default logbook loaded:", flights.length);
-        buildRouteOverlays();
-        populateRouteSelect();
-        if(document.getElementById('filterAirports').checked) drawFlightAirports();
-      }
-    });
-  }
-
 }
 
+// ----------------------
+// Draw all airports (discreet, behind flight airports)
+// ----------------------
+function drawAllAirports() {
+    airportMarkers.forEach(m => map.removeLayer(m));
+    airportMarkers = [];
 
-});
+    Object.entries(airports).forEach(([code, a]) => {
+        if (!a) return;
+
+    // subtle visual style (fixed screen size, does not scale with zoom)
+    const marker = L.circleMarker([a.lat, a.lng], {
+        radius: .001,            // size in pixels
+        fill: true,
+        fillOpacity: 1,     // very subtle
+        color: '#ffffff',        // muted grey
+        opacity: 0.1,         // subtle border
+        interactive: true
+    }).addTo(map);
+
+        marker.bindTooltip(`${a.name} (${code})`, { direction: 'auto', sticky: true });
+
+        marker.on('click', e => {
+            const content = [
+                `<b>${a.name}</b>`,
+                a.type ? `Type: ${a.type}` : '',
+                a.municipality ? `City: ${a.municipality}` : '',
+                a.ICAO ? `ICAO: ${a.ICAO}` : '',
+                a.IATA ? `IATA: ${a.IATA}` : '',
+                a.GPS ? `GPS: ${a.GPS}` : '',
+                a.local_code ? `Local: ${a.local_code}` : '',
+                !isNaN(a.lat) && !isNaN(a.lng) ? `Lat/Lon: ${a.lat.toFixed(4)}, ${a.lng.toFixed(4)}` : '',
+                a.elevation_ft ? `Elevation: ${a.elevation_ft} ft` : '',
+                a.scheduled_service ? `Scheduled service: ${a.scheduled_service}` : '',
+                a.continent ? `Continent: ${a.continent}` : '',
+                a.iso_country ? `Country: ${a.iso_country}` : '',
+                a.iso_region ? `Region: ${a.iso_region}` : '',
+                a.home_link ? `<a href="${a.home_link}" target="_blank">Website</a>` : '',
+                a.wikipedia_link ? `<a href="${a.wikipedia_link}" target="_blank">Wikipedia</a>` : '',
+                a.keywords ? `Keywords: ${a.keywords}` : ''
+            ].filter(Boolean).join('<br/>');
+
+            L.popup({ closeButton: true })
+             .setLatLng(e.latlng)
+             .setContent(content)
+             .openOn(map);
+        });
+
+        airportMarkers.push(marker);
+    });
+}
+
+// ----------------------
+// Draw airports used in flights (on top, more visible)
+// ----------------------
+function drawFlightAirports() {
+    flightAirportsMarkers.forEach(m => map.removeLayer(m));
+    flightAirportsMarkers = [];
+
+    const added = new Set();
+    Object.values(routes).forEach(r => {
+        [r.origin, r.destination].forEach(code => {
+            if (!code || added.has(code)) return;
+            const a = airports[code];
+            if (!a) return;
+
+            // more prominent style
+            const marker = L.circleMarker([a.lat, a.lng], {
+                radius: 5,
+                fill: true,
+                fillOpacity: 0.8,
+                color: '#0ff',
+                interactive: true
+            }).addTo(map);
+
+            marker.bindTooltip(`${a.name} (${code})`, { direction: 'auto', sticky: true });
+
+            marker.on('click', e => {
+                const content = [
+                    `<b>${a.name}</b>`,
+                    a.type ? `Type: ${a.type}` : '',
+                    a.municipality ? `City: ${a.municipality}` : '',
+                    a.ICAO ? `ICAO: ${a.ICAO}` : '',
+                    a.IATA ? `IATA: ${a.IATA}` : '',
+                    a.GPS ? `GPS: ${a.GPS}` : '',
+                    a.local_code ? `Local: ${a.local_code}` : '',
+                    !isNaN(a.lat) && !isNaN(a.lng) ? `Lat/Lon: ${a.lat.toFixed(4)}, ${a.lng.toFixed(4)}` : '',
+                    a.elevation_ft ? `Elevation: ${a.elevation_ft} ft` : '',
+                    a.scheduled_service ? `Scheduled service: ${a.scheduled_service}` : '',
+                    a.continent ? `Continent: ${a.continent}` : '',
+                    a.iso_country ? `Country: ${a.iso_country}` : '',
+                    a.iso_region ? `Region: ${a.iso_region}` : '',
+                    a.home_link ? `<a href="${a.home_link}" target="_blank">Website</a>` : '',
+                    a.wikipedia_link ? `<a href="${a.wikipedia_link}" target="_blank">Wikipedia</a>` : '',
+                    a.keywords ? `Keywords: ${a.keywords}` : ''
+                ].filter(Boolean).join('<br/>');
+
+                L.popup({ closeButton: true })
+                 .setLatLng(e.latlng)
+                 .setContent(content)
+                 .openOn(map);
+            });
+
+            flightAirportsMarkers.push(marker);
+            added.add(code);
+        });
+    });
+}}})
+
+
 </script>
 
 </body>
